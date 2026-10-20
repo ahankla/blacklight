@@ -29,7 +29,7 @@ DEP_EXT = d
 CXX := g++
 
 # Set compiler options: g++
-ifeq ($(CXX), g++)
+ifneq ($(filter g++ g++-%,$(CXX)),)
 DEPENDENCY_OPTIONS := -MMD -MP
 INCLUDE_OPTIONS :=
 DIALECT_OPTIONS := -std=c++17 -fopenmp
