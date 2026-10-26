@@ -149,6 +149,8 @@ int InputReader::Read()
       simulation_kappa_name = val;
     else if (key == "simulation_interp")
       simulation_interp = ReadBool(val);
+    else if (key == "simulation_phi_periodic")
+      simulation_phi_periodic = ReadBool(val);
     else if (key == "simulation_block_interp")
       simulation_block_interp = ReadBool(val);
 
@@ -205,6 +207,10 @@ int InputReader::Read()
       camera_resolution = std::stoi(val);
 
     // Store ray-tracing parameters
+    else if (key == "sample_spatial_reuse")
+      sample_spatial_reuse = ReadBool(val);
+    else if (key == "ray_sample_cut")
+      ray_sample_cut = ReadBool(val);
     else if (key == "ray_flat")
       ray_flat = ReadBool(val);
     else if (key == "ray_terminate")
@@ -289,6 +295,12 @@ int InputReader::Read()
       adaptive_block_size = std::stoi(val);
     else if (key == "adaptive_frequency_num")
       adaptive_frequency_num = std::stoi(val);
+    else if (key == "adaptive_criteria_r_min")
+      adaptive_criteria_r_min = std::stod(val);
+    else if (key == "adaptive_criteria_r_max")
+      adaptive_criteria_r_max = std::stod(val);
+    else if (key == "adaptive_intensity_floor")
+      adaptive_intensity_floor = std::stod(val);
     else if (key == "adaptive_val_cut")
       adaptive_val_cut = std::stod(val);
     else if (key == "adaptive_val_frac")
@@ -414,6 +426,17 @@ int InputReader::Read()
       throw BlacklightException(message.str().c_str());
     }
   }
+
+  if (simulation_phi_periodic.value_or(false)
+      and (model_type.value() != ModelType::simulation
+          or simulation_format.value() != SimulationFormat::athena
+          or simulation_coord.value() != Coordinates::sks
+          or not simulation_interp.value_or(false)
+          or simulation_block_interp.value_or(false)
+          or checkpoint_sample_load.value_or(false)
+          or checkpoint_sample_save.value_or(false)))
+    throw BlacklightException("simulation_phi_periodic requires spherical Athena (sks), "
+        "simulation_interp=true, simulation_block_interp=false and no sample checkpoints.");
 
   // Count number of runs to do
   int num_runs = 1;

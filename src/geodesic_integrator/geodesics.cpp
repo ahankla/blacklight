@@ -4,6 +4,7 @@
 #include <algorithm>  // max, min
 #include <cmath>      // abs, ceil, isfinite, pow, sqrt
 #include <sstream>    // ostringstream
+#include <vector>     // vector
 
 // Library headers
 #include <omp.h>  // pragmas
@@ -807,37 +808,84 @@ void GeodesicIntegrator::IntegrateGeodesicsRK2()
 //   Deallocates geodesic_pos, geodesic_dir, and geodesic_len.
 void GeodesicIntegrator::ReverseGeodesics()
 {
-  // Allocate arrays
   int num_pix = camera_num_pix;
   if (adaptive_level > 0)
     num_pix = block_counts[adaptive_level] * block_num_pix;
+
+  // Use exactly the same midpoint radius and strict sphere-cut inequalities as
+  // CalculateSimulationSampling. Bad-ray fallback precedes spatial cuts there,
+  // so flagged rays must retain their samples regardless of midpoint radius.
+  auto keep_sample = [this](int m, int n)
+  {
+    if (not ray_sample_cut or sample_flags[adaptive_level](m))
+      return true;
+    double r = RadialGeodesicCoordinate(geodesic_pos(m,n,1), geodesic_pos(m,n,2),
+        geodesic_pos(m,n,3));
+    return not ((sample_cut_omit_in >= 0.0 and r < sample_cut_omit_in)
+        or (sample_cut_omit_out >= 0.0 and r > sample_cut_omit_out));
+  };
+
+  // Count before allocating the reversed arrays. Only per-ray old counts are
+  // temporary; geodesic integration, momenta, flags, and step lengths are unchanged.
+  std::vector<int> original_counts;
+  if (ray_sample_cut)
+  {
+    original_counts.resize(static_cast<std::size_t>(num_pix));
+    int max_samples = 0;
+    #pragma omp parallel for schedule(static) reduction(max: max_samples)
+    for (int m = 0; m < num_pix; m++)
+    {
+      int old_count = sample_num[adaptive_level](m);
+      original_counts[static_cast<std::size_t>(m)] = old_count;
+      int count = 0;
+      for (int n = 0; n < old_count; n++)
+      {
+        if (geodesic_len(m,n) == 0.0)
+          break;
+        if (keep_sample(m,n))
+          count++;
+      }
+      sample_num[adaptive_level](m) = count;
+      max_samples = std::max(max_samples, count);
+    }
+    // Array cannot allocate an empty dimension. All-empty rays still have zero
+    // sample_num, so this storage slot never enters sampling or transfer loops.
+    geodesic_num_steps[adaptive_level] = std::max(1, max_samples);
+  }
+
   sample_pos[adaptive_level].Allocate(num_pix, geodesic_num_steps[adaptive_level], 4);
   sample_dir[adaptive_level].Allocate(num_pix, geodesic_num_steps[adaptive_level], 4);
   sample_len[adaptive_level].Allocate(num_pix, geodesic_num_steps[adaptive_level]);
   sample_len[adaptive_level].Zero();
 
-  // Go through samples
   #pragma omp parallel for schedule(static)
   for (int m = 0; m < num_pix; m++)
   {
-    int num_steps = sample_num[adaptive_level](m);
-    for (int n = 0; n < num_steps; n++)
+    int count = sample_num[adaptive_level](m);
+    int old_count = ray_sample_cut ? original_counts[static_cast<std::size_t>(m)] : count;
+    // Unpolarized transfer reads the initial position even for a zero-sample ray.
+    if (ray_sample_cut and count == 0)
+      for (int mu = 0; mu < 4; mu++)
+      {
+        sample_pos[adaptive_level](m,0,mu) = 0.0;
+        sample_dir[adaptive_level](m,0,mu) = 0.0;
+      }
+    int destination = count;
+    for (int n = 0; n < old_count; n++)
     {
-      // Skip terminated geodesics
       double len = geodesic_len(m,n);
       if (len == 0.0)
         break;
-
-      // Set new arrays in reverse order
-      sample_pos[adaptive_level](m,num_steps-1-n,0) = geodesic_pos(m,n,0);
-      sample_pos[adaptive_level](m,num_steps-1-n,1) = geodesic_pos(m,n,1);
-      sample_pos[adaptive_level](m,num_steps-1-n,2) = geodesic_pos(m,n,2);
-      sample_pos[adaptive_level](m,num_steps-1-n,3) = geodesic_pos(m,n,3);
-      sample_dir[adaptive_level](m,num_steps-1-n,0) = geodesic_dir(m,n,0);
-      sample_dir[adaptive_level](m,num_steps-1-n,1) = geodesic_dir(m,n,1);
-      sample_dir[adaptive_level](m,num_steps-1-n,2) = geodesic_dir(m,n,2);
-      sample_dir[adaptive_level](m,num_steps-1-n,3) = geodesic_dir(m,n,3);
-      sample_len[adaptive_level](m,num_steps-1-n) = -len;
+      if (not keep_sample(m,n))
+        continue;
+      // Reverse retained samples without merging steps or changing their times.
+      destination--;
+      for (int mu = 0; mu < 4; mu++)
+      {
+        sample_pos[adaptive_level](m,destination,mu) = geodesic_pos(m,n,mu);
+        sample_dir[adaptive_level](m,destination,mu) = geodesic_dir(m,n,mu);
+      }
+      sample_len[adaptive_level](m,destination) = -len;
     }
   }
 

@@ -718,6 +718,36 @@ double SimulationReader::Read(int snapshot)
       }
     }
 
+    // Validate the original domain BEFORE the legacy angular-face repair below.
+    // Opt-in periodic intrablock interpolation supports one full spherical block
+    // only; Athena grids are assumed fixed across the snapshot sequence.
+    if (first_time and p_input_reader->simulation_phi_periodic.value_or(false))
+    {
+      if (x1f.n2 != 1 or x2f.n2 != 1 or x3f.n2 != 1 or x3v.n2 != 1
+          or x1v.n1 < 2 or x2v.n1 < 2 or x3v.n1 < 2
+          or x3f.n1 != x3v.n1 + 1)
+        throw BlacklightException("simulation_phi_periodic requires a single full-2pi "
+            "meshblock with at least two cells in each direction.");
+      const double period = 2.0 * Math::pi;
+      const double tolerance = 1.0e-6; // Athena coordinates may be float32.
+      if (not std::isfinite(x3f(0,0)) or not std::isfinite(x3f(0,x3f.n1-1))
+          or std::abs(x3f(0,0)) > tolerance
+          or std::abs(x3f(0,x3f.n1-1) - period) > tolerance)
+        throw BlacklightException("simulation_phi_periodic requires raw phi faces [0, 2*pi]; "
+            "partial or shifted domains are unsupported.");
+      for (int k = 0; k < x3v.n1; k++)
+        if (not std::isfinite(x3v(0,k)) or not std::isfinite(x3f(0,k))
+            or not (x3f(0,k) < x3v(0,k) and x3v(0,k) < x3f(0,k+1))
+            or (k > 0 and not (x3v(0,k-1) < x3v(0,k))))
+          throw BlacklightException("simulation_phi_periodic requires finite, ordered phi "
+              "centers strictly inside their faces.");
+      // Canonicalize endpoint roundoff only after proving full-domain coverage.
+      x3f(0,0) = 0.0;
+      x3f(0,x3f.n1-1) = period;
+      if (x3v(0,0) <= 0.0 or x3v(0,x3v.n1-1) >= period)
+        throw BlacklightException("simulation_phi_periodic centers must lie inside (0, 2*pi).");
+    }
+
     // Check coordinates
     if (first_time)
     {

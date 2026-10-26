@@ -51,6 +51,9 @@ struct GeodesicIntegrator
 
   // Input data - ray-tracing parameters
   bool ray_flat;
+  bool ray_sample_cut = false;
+  double sample_cut_omit_in = -1.0;
+  double sample_cut_omit_out = -1.0;
   RayTerminate ray_terminate;
   double ray_factor;
   RayIntegrator ray_integrator;
@@ -95,6 +98,7 @@ struct GeodesicIntegrator
 
   // Geodesic data
   int *geodesic_num_steps = nullptr;
+  bool *layout_reused = nullptr;
   Array<double> geodesic_pos;
   Array<double> geodesic_dir;
   Array<double> geodesic_len;

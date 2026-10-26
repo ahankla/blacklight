@@ -138,7 +138,21 @@ void RadiationIntegrator::CalculateSimulationSampling(int snapshot)
     num_interp_fracs++;
   if (adaptive_level > 0)
     num_pix = block_counts[adaptive_level] * block_num_pix;
-  if (first_time or adaptive_level > 0)
+  bool reuse_spatial = sample_spatial_reuse and geodesic_layout_reused[adaptive_level]
+      and sample_inds[adaptive_level].allocated and sample_fracs[adaptive_level].allocated
+      and sample_nan[adaptive_level].allocated and sample_cut[adaptive_level].allocated
+      and sample_fallback[adaptive_level].allocated
+      and sample_inds[adaptive_level].n3 == num_pix
+      and sample_inds[adaptive_level].n2 == geodesic_num_steps[adaptive_level];
+  if (sample_spatial_reuse and not reuse_spatial)
+  {
+    sample_inds[adaptive_level].Deallocate();
+    sample_fracs[adaptive_level].Deallocate();
+    sample_nan[adaptive_level].Deallocate();
+    sample_cut[adaptive_level].Deallocate();
+    sample_fallback[adaptive_level].Deallocate();
+  }
+  if (not reuse_spatial and (first_time or adaptive_level > 0 or sample_spatial_reuse))
   {
     if ((simulation_format == SimulationFormat::athena
         or simulation_format == SimulationFormat::athenak) and simulation_interp
@@ -155,9 +169,12 @@ void RadiationIntegrator::CalculateSimulationSampling(int snapshot)
     sample_cut[adaptive_level].Allocate(num_pix, geodesic_num_steps[adaptive_level]);
     sample_fallback[adaptive_level].Allocate(num_pix, geodesic_num_steps[adaptive_level]);
   }
-  sample_nan[adaptive_level].Zero();
-  sample_cut[adaptive_level].Zero();
-  sample_fallback[adaptive_level].Zero();
+  if (not reuse_spatial)
+  {
+    sample_nan[adaptive_level].Zero();
+    sample_cut[adaptive_level].Zero();
+    sample_fallback[adaptive_level].Zero();
+  }
 
   // Prepare bookkeeping for warnings and errors
   int num_extrap_camera_small = 0;
@@ -234,65 +251,73 @@ void RadiationIntegrator::CalculateSimulationSampling(int snapshot)
         double x2 = sample_pos[adaptive_level](m,n,2);
         double x3 = sample_pos[adaptive_level](m,n,3);
 
-        // Cut outside camera radius
-        double r = RadialGeodesicCoordinate(x1, x2, x3);
-        if (r > camera_r)
-        {
-          sample_cut[adaptive_level](m,n) = true;
+        // Cut masks are spatial, but off-grid NaN/fallback samples must still
+        // execute temporal warning bookkeeping, exactly as on the first frame.
+        if (reuse_spatial and sample_cut[adaptive_level](m,n))
           continue;
-        }
-
-        // Cut camera plane
-        if (cut_omit_near or cut_omit_far)
+        if (not reuse_spatial)
         {
-          double dot_product = x1 * camera_x[1] + x2 * camera_x[2] + x3 * camera_x[3];
-          if ((cut_omit_near and dot_product > 0.0) or (cut_omit_far and dot_product < 0.0))
+          // Cut outside camera radius
+          double r = RadialGeodesicCoordinate(x1, x2, x3);
+          if (r > camera_r)
           {
             sample_cut[adaptive_level](m,n) = true;
             continue;
           }
-        }
 
-        // Cut spheres
-        if ((cut_omit_in >= 0.0 and r < cut_omit_in) or (cut_omit_out >= 0.0 and r > cut_omit_out))
-        {
-          sample_cut[adaptive_level](m,n) = true;
-          continue;
-        }
+          // Cut camera plane
+          if (cut_omit_near or cut_omit_far)
+          {
+            double dot_product = x1 * camera_x[1] + x2 * camera_x[2] + x3 * camera_x[3];
+            if ((cut_omit_near and dot_product > 0.0) or (cut_omit_far and dot_product < 0.0))
+            {
+              sample_cut[adaptive_level](m,n) = true;
+              continue;
+            }
+          }
 
-        // Cut with respect to midplane
-        if (cut_midplane_theta > 0.0 or cut_midplane_theta < 0.0)
-        {
-          double th = std::acos(x3 / r);
-          if ((cut_midplane_theta > 0.0 and std::abs(th - Math::pi / 2.0) > cut_midplane_theta)
-              or (cut_midplane_theta < 0.0 and std::abs(th - Math::pi / 2.0) < -cut_midplane_theta))
+          // Cut spheres
+          if ((cut_omit_in >= 0.0 and r < cut_omit_in) or (cut_omit_out >= 0.0 and r > cut_omit_out))
           {
             sample_cut[adaptive_level](m,n) = true;
             continue;
           }
-        }
-        if ((cut_midplane_z > 0.0 and std::abs(x3) > cut_midplane_z)
-            or (cut_midplane_z < 0.0 and std::abs(x3) < -cut_midplane_z))
-        {
-          sample_cut[adaptive_level](m,n) = true;
-          continue;
-        }
 
-        // Cut arbitrary plane
-        if (cut_plane)
-        {
-          double dot_product = (x1 - cut_plane_origin_x) * cut_plane_normal_x
-              + (x2 - cut_plane_origin_y) * cut_plane_normal_y
-              + (x3 - cut_plane_origin_z) * cut_plane_normal_z;
-          if (dot_product < 0.0)
+          // Cut with respect to midplane
+          if (cut_midplane_theta > 0.0 or cut_midplane_theta < 0.0)
+          {
+            double th = std::acos(x3 / r);
+            if ((cut_midplane_theta > 0.0 and std::abs(th - Math::pi / 2.0) > cut_midplane_theta)
+                or (cut_midplane_theta < 0.0 and std::abs(th - Math::pi / 2.0) < -cut_midplane_theta))
+            {
+              sample_cut[adaptive_level](m,n) = true;
+              continue;
+            }
+          }
+          if ((cut_midplane_z > 0.0 and std::abs(x3) > cut_midplane_z)
+              or (cut_midplane_z < 0.0 and std::abs(x3) < -cut_midplane_z))
           {
             sample_cut[adaptive_level](m,n) = true;
             continue;
           }
-        }
 
-        // Convert coordinates
-        ConvertFromCKS(&x1, &x2, &x3);
+          // Cut arbitrary plane
+          if (cut_plane)
+          {
+            double dot_product = (x1 - cut_plane_origin_x) * cut_plane_normal_x
+                + (x2 - cut_plane_origin_y) * cut_plane_normal_y
+                + (x3 - cut_plane_origin_z) * cut_plane_normal_z;
+            if (dot_product < 0.0)
+            {
+              sample_cut[adaptive_level](m,n) = true;
+              continue;
+            }
+          }
+
+          // Convert coordinates
+          ConvertFromCKS(&x1, &x2, &x3);
+
+        }
 
         // Calculate time interpolation
         int t_ind = 0;
@@ -346,6 +371,13 @@ void RadiationIntegrator::CalculateSimulationSampling(int snapshot)
             else if (time[t_ind-1] - x0 <= x0 - time[t_ind])
               t_ind--;
           }
+        }
+
+        if (reuse_spatial)
+        {
+          sample_inds[adaptive_level](m,n,4) = t_ind;
+          sample_fracs[adaptive_level](m,n,3) = t_frac;
+          continue;
         }
 
         // Determine block
@@ -488,6 +520,8 @@ void RadiationIntegrator::CalculateSimulationSampling(int snapshot)
             double f_i = (x1 - x1v(b,i_m)) / (x1v(b,i_m+1) - x1v(b,i_m));
             double f_j = (x2 - x2v(b,j_m)) / (x2v(b,j_m+1) - x2v(b,j_m));
             double f_k = (x3 - x3v(b,k_m)) / (x3v(b,k_m+1) - x3v(b,k_m));
+            if (simulation_phi_periodic)
+              PeriodicPhiStencil(b, x3, &k_m, &f_k);
             sample_inds[adaptive_level](m,n,0) = b;
             sample_inds[adaptive_level](m,n,1) = k_m;
             sample_inds[adaptive_level](m,n,2) = j_m;
@@ -1033,7 +1067,7 @@ void RadiationIntegrator::SampleSimulation()
   }
 
   // Free memory
-  if (adaptive_level > 0)
+  if (adaptive_level > 0 and not sample_spatial_reuse)
   {
     sample_inds[adaptive_level].Deallocate();
     sample_fracs[adaptive_level].Deallocate();
@@ -1331,6 +1365,21 @@ void RadiationIntegrator::FindNearbyInds(int b, int k, int j, int i, int k_c, in
 //   f_k, f_j, f_i: interpolation fractions
 // Outputs:
 //   returned value: interpolated value from grid
+// Replace only the seam stencil: its lower center is the last cell and its
+// upper center is cell zero translated by exactly 2*pi. Interior stencils stay
+// unchanged. The stored lower index is always valid for fallback primitive reads.
+void RadiationIntegrator::PeriodicPhiStencil(int b, double phi, int *k, double *fraction) const
+{
+  int last = x3v.n1 - 1;
+  if (phi < x3v(b,0) or phi >= x3v(b,last))
+  {
+    double unwrapped = phi < x3v(b,0) ? phi + 2.0 * Math::pi : phi;
+    *k = last;
+    *fraction = (unwrapped - x3v(b,last))
+        / (x3v(b,0) + 2.0 * Math::pi - x3v(b,last));
+  }
+}
+
 double RadiationIntegrator::InterpolateSimple(const Array<float> &grid_vals, int grid_ind, int b,
     int k, int j, int i, double f_k, double f_j, double f_i)
 {
@@ -1338,10 +1387,11 @@ double RadiationIntegrator::InterpolateSimple(const Array<float> &grid_vals, int
   double val_mmp = static_cast<double>(grid_vals(grid_ind,b,k,j,i+1));
   double val_mpm = static_cast<double>(grid_vals(grid_ind,b,k,j+1,i));
   double val_mpp = static_cast<double>(grid_vals(grid_ind,b,k,j+1,i+1));
-  double val_pmm = static_cast<double>(grid_vals(grid_ind,b,k+1,j,i));
-  double val_pmp = static_cast<double>(grid_vals(grid_ind,b,k+1,j,i+1));
-  double val_ppm = static_cast<double>(grid_vals(grid_ind,b,k+1,j+1,i));
-  double val_ppp = static_cast<double>(grid_vals(grid_ind,b,k+1,j+1,i+1));
+  int k_p = simulation_phi_periodic and k == grid_vals.n3 - 1 ? 0 : k + 1;
+  double val_pmm = static_cast<double>(grid_vals(grid_ind,b,k_p,j,i));
+  double val_pmp = static_cast<double>(grid_vals(grid_ind,b,k_p,j,i+1));
+  double val_ppm = static_cast<double>(grid_vals(grid_ind,b,k_p,j+1,i));
+  double val_ppp = static_cast<double>(grid_vals(grid_ind,b,k_p,j+1,i+1));
   double val = (1.0 - f_k) * (1.0 - f_j) * (1.0 - f_i) * val_mmm
       + (1.0 - f_k) * (1.0 - f_j) * f_i * val_mmp + (1.0 - f_k) * f_j * (1.0 - f_i) * val_mpm
       + (1.0 - f_k) * f_j * f_i * val_mpp + f_k * (1.0 - f_j) * (1.0 - f_i) * val_pmm

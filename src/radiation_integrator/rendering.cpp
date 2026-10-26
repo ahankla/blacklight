@@ -28,6 +28,10 @@ void RadiationIntegrator::Render()
   int num_pix = camera_num_pix;
   if (adaptive_level > 0)
     num_pix = block_counts[adaptive_level] * block_num_pix;
+  // Adaptive outputs persist until the next frame, whose layout may differ.
+  // Release the previous output before allocating this frame's fresh result.
+  if (adaptive_level > 0)
+    render[adaptive_level].Deallocate();
   if (first_time or adaptive_level > 0)
     render[adaptive_level].Allocate(render_num_images, 3, num_pix);
   render[adaptive_level].Zero();

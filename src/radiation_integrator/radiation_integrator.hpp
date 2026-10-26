@@ -42,6 +42,7 @@ struct RadiationIntegrator
   double simulation_rho_cgs;
   bool simulation_interp;
   bool simulation_block_interp;
+  bool simulation_phi_periodic = false;
 
   // Input data - formula parameters
   double formula_mass;
@@ -104,6 +105,9 @@ struct RadiationIntegrator
   int adaptive_block_size;
   int adaptive_frequency_num;
   double adaptive_val_cut;
+  double adaptive_intensity_floor = 0.0;
+  double adaptive_criteria_r_min = -1.0;
+  double adaptive_criteria_r_max = -1.0;
   double adaptive_val_frac;
   double adaptive_abs_grad_cut;
   double adaptive_abs_grad_frac;
@@ -172,6 +176,9 @@ struct RadiationIntegrator
 
   // Flag for tracking function calls
   bool first_time = true;
+  // Opt-in fixed spatial grid; only temporal interpolation is refreshed.
+  bool sample_spatial_reuse = false;
+  const bool *geodesic_layout_reused = nullptr;
 
   // Geometry data
   double bh_m;
@@ -313,6 +320,7 @@ struct RadiationIntegrator
   void SampleSimulation();
   void FindNearbyInds(int b, int k, int j, int i, int k_c, int j_c, int i_c, double x3, double x2,
       double x1, int inds[4]);
+  void PeriodicPhiStencil(int b, double phi, int *k, double *fraction) const;
   double InterpolateSimple(const Array<float> &grid_vals, int grid_ind, int b, int k, int j, int i,
       double f_k, double f_j, double f_i);
   double InterpolateAdvanced(const Array<float> &grid_vals, int grid_ind, int m, int n);

@@ -54,6 +54,7 @@ struct InputReader
   std::optional<std::string> simulation_kappa_name;
   std::optional<bool> simulation_interp;
   std::optional<bool> simulation_block_interp;
+  std::optional<bool> simulation_phi_periodic;
 
   // Data - formula parameters
   std::optional<double> formula_mass;
@@ -86,6 +87,9 @@ struct InputReader
 
   // Data - ray-tracing parameters
   std::optional<bool> ray_flat;
+  std::optional<bool> ray_sample_cut;
+  // Opt-in assertion that the Athena spatial grid is fixed across all snapshots.
+  std::optional<bool> sample_spatial_reuse;
   std::optional<RayTerminate> ray_terminate;
   std::optional<double> ray_factor;
   std::optional<RayIntegrator> ray_integrator;
@@ -143,6 +147,9 @@ struct InputReader
   std::optional<int> adaptive_block_size;
   std::optional<int> adaptive_frequency_num;
   std::optional<double> adaptive_val_cut;
+  std::optional<double> adaptive_intensity_floor;
+  std::optional<double> adaptive_criteria_r_min;
+  std::optional<double> adaptive_criteria_r_max;
   std::optional<double> adaptive_val_frac;
   std::optional<double> adaptive_abs_grad_cut;
   std::optional<double> adaptive_abs_grad_frac;

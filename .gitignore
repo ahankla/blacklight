@@ -1,0 +1,8 @@
+# Preserved executable used only for before/after AMR regression tests.
+bin/blacklight.before-amr
+
+# Reference executable for optional fixed-grid spatial sampling reuse.
+bin/blacklight.before-spatial
+bin/blacklight.spatial
+bin/blacklight.arcs
+bin/blacklight.periodic

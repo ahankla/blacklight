@@ -704,7 +704,8 @@ void RadiationIntegrator::CalculateSimulationCoefficients()
   // Free memory
   if (adaptive_level > 0)
   {
-    sample_cut[adaptive_level].Deallocate();
+    if (not sample_spatial_reuse)
+      sample_cut[adaptive_level].Deallocate();
     sample_rho[adaptive_level].Deallocate();
     sample_pgas[adaptive_level].Deallocate();
     sample_kappa[adaptive_level].Deallocate();

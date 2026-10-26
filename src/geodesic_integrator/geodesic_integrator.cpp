@@ -25,6 +25,56 @@ GeodesicIntegrator::GeodesicIntegrator(const InputReader *p_input_reader)
   // Copy general input data
   model_type = p_input_reader->model_type.value();
 
+  // Validate opt-in sampling assumptions before tracing or reading checkpoints.
+  if (p_input_reader->sample_spatial_reuse.value_or(false)
+      and (model_type != ModelType::simulation
+          or p_input_reader->simulation_format.value() != SimulationFormat::athena
+          or not p_input_reader->simulation_interp.value_or(false)
+          or p_input_reader->simulation_block_interp.value_or(false)
+          or not p_input_reader->slow_light_on.value_or(false)
+          or not p_input_reader->slow_interp.value_or(false)))
+    throw BlacklightException("sample_spatial_reuse requires a fixed Athena grid, "
+        "simulation_interp=true, simulation_block_interp=false, "
+        "slow_light_on=true and slow_interp=true.");
+
+  // Reject incompatible checkpoint layouts before Integrate can load them.
+  if (p_input_reader->sample_spatial_reuse.value_or(false)
+      and (p_input_reader->checkpoint_geodesic_load.value_or(false)
+          or p_input_reader->checkpoint_geodesic_save.value_or(false)
+          or p_input_reader->checkpoint_sample_load.value_or(false)
+          or p_input_reader->checkpoint_sample_save.value_or(false)))
+    throw BlacklightException("sample_spatial_reuse is incompatible with checkpoints.");
+
+  // Optional storage-only optimization: omitted radial samples have zero scalar
+  // emissivity/absorption. Vacuum polarization transport and path diagnostics do
+  // not share this invariance. Checkpoints do not record the compacted layout.
+  ray_sample_cut = p_input_reader->ray_sample_cut.value_or(false);
+  if (ray_sample_cut)
+  {
+    if (model_type != ModelType::simulation
+        or p_input_reader->image_polarization.value_or(false)
+        or p_input_reader->render_num_images.value_or(0) != 0
+        or not (p_input_reader->image_light.value_or(false)
+            or p_input_reader->image_tau.value_or(false))
+        or p_input_reader->image_time.value_or(false)
+        or p_input_reader->image_length.value_or(false)
+        or p_input_reader->image_lambda.value_or(false)
+        or p_input_reader->image_emission.value_or(false)
+        or p_input_reader->image_lambda_ave.value_or(false)
+        or p_input_reader->image_emission_ave.value_or(false)
+        or p_input_reader->image_tau_int.value_or(false)
+        or p_input_reader->image_crossings.value_or(false))
+      throw BlacklightException("ray_sample_cut requires simulation, unpolarized I_nu/tau "
+          "only, no rendering or path diagnostics.");
+    if (p_input_reader->checkpoint_geodesic_save.value_or(false)
+        or p_input_reader->checkpoint_geodesic_load.value_or(false)
+        or p_input_reader->checkpoint_sample_save.value_or(false)
+        or p_input_reader->checkpoint_sample_load.value_or(false))
+      throw BlacklightException("ray_sample_cut is incompatible with geodesic/sample checkpoints.");
+    sample_cut_omit_in = p_input_reader->cut_omit_in.value_or(-1.0);
+    sample_cut_omit_out = p_input_reader->cut_omit_out.value_or(-1.0);
+  }
+
   // Copy checkpoint parameters
   checkpoint_geodesic_save = p_input_reader->checkpoint_geodesic_save.value();
   checkpoint_geodesic_load = p_input_reader->checkpoint_geodesic_load.value();
@@ -135,6 +185,7 @@ GeodesicIntegrator::GeodesicIntegrator(const InputReader *p_input_reader)
 
   // Allocate space for geodesic data
   geodesic_num_steps = new int[adaptive_max_level+1];
+  layout_reused = new bool[adaptive_max_level+1]();
   sample_flags = new Array<bool>[adaptive_max_level+1];
   sample_num = new Array<int>[adaptive_max_level+1];
   sample_pos = new Array<double>[adaptive_max_level+1];
@@ -178,6 +229,7 @@ GeodesicIntegrator::~GeodesicIntegrator()
   delete[] camera_dir;
   delete[] momentum_factors;
   delete[] geodesic_num_steps;
+  delete[] layout_reused;
   delete[] sample_flags;
   delete[] sample_num;
   delete[] sample_pos;
@@ -216,6 +268,10 @@ double GeodesicIntegrator::Integrate()
     ReverseGeodesics();
   }
 
+  // Root rays are fixed for subsequent radiation frames of this object.
+  layout_reused[0] = sample_pos[0].allocated and sample_dir[0].allocated
+      and sample_len[0].allocated and sample_num[0].allocated;
+
   // Save data to checkpoint
   if (checkpoint_geodesic_save)
     SaveGeodesics();
@@ -238,12 +294,64 @@ double GeodesicIntegrator::AddGeodesics(const RadiationIntegrator *p_radiation_i
   // Prepare timer
   double time_start = omp_get_wtime();
 
-  // Increment adaptive level counter
-  adaptive_level++;
+  // Radiation resets its level after every frame; this object retains geodesics.
+  // Follow the requested level rather than incrementing across frame boundaries.
+  adaptive_level = p_radiation_integrator->adaptive_level;
+  if (adaptive_level < 1 or adaptive_level > adaptive_max_level)
+    throw BlacklightException("Invalid requested adaptive geodesic level.");
+
+  layout_reused[adaptive_level] = false;
 
   // Acquire refinement data
   block_counts = p_radiation_integrator->block_counts;
   refinement_flags = p_radiation_integrator->refinement_flags;
+
+  // Camera and metric parameters are fixed for this object's lifetime. Reuse only
+  // a complete cache with exactly the child ordering AugmentCamera would produce;
+  // equal block counts alone do not imply equal rays. Deeper caches remain valid
+  // independently: their absolute locations will be checked when requested.
+  bool reuse = camera_loc[adaptive_level].allocated
+      and camera_loc[adaptive_level].n2 == block_counts[adaptive_level]
+      and camera_pos[adaptive_level].allocated and camera_dir[adaptive_level].allocated
+      and momentum_factors[adaptive_level].allocated
+      and sample_flags[adaptive_level].allocated and sample_num[adaptive_level].allocated
+      and sample_pos[adaptive_level].allocated and sample_dir[adaptive_level].allocated
+      and sample_len[adaptive_level].allocated;
+  if (reuse)
+  {
+    int block = 0;
+    for (int parent = 0; parent < block_counts[adaptive_level-1] and reuse; parent++)
+      if (refinement_flags[adaptive_level-1](parent))
+      {
+        int y = 2 * camera_loc[adaptive_level-1](parent,0);
+        int x = 2 * camera_loc[adaptive_level-1](parent,1);
+        for (int dy = 0; dy < 2 and reuse; dy++)
+          for (int dx = 0; dx < 2 and reuse; dx++, block++)
+            if (block >= block_counts[adaptive_level]
+                or camera_loc[adaptive_level](block,0) != y + dy
+                or camera_loc[adaptive_level](block,1) != x + dx)
+              reuse = false;
+      }
+    reuse = reuse and block == block_counts[adaptive_level];
+  }
+  if (reuse)
+  {
+    layout_reused[adaptive_level] = true;
+    return omp_get_wtime() - time_start;
+  }
+
+  // Array::Allocate cannot replace an existing allocation. Discard this level's
+  // old camera and reversed samples before rebuilding a changed layout. Radiation
+  // sampling and coefficients are still recomputed by RadiationIntegrator each frame.
+  camera_loc[adaptive_level].Deallocate();
+  camera_pos[adaptive_level].Deallocate();
+  camera_dir[adaptive_level].Deallocate();
+  momentum_factors[adaptive_level].Deallocate();
+  sample_flags[adaptive_level].Deallocate();
+  sample_num[adaptive_level].Deallocate();
+  sample_pos[adaptive_level].Deallocate();
+  sample_dir[adaptive_level].Deallocate();
+  sample_len[adaptive_level].Deallocate();
 
   // Calculate geodesics
   AugmentCamera();

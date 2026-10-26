@@ -31,6 +31,28 @@ RadiationIntegrator::RadiationIntegrator(const InputReader *p_input_reader,
   model_type = p_input_reader->model_type.value();
   num_threads = p_input_reader->num_threads.value();
 
+  // Enabling this option explicitly asserts identical Athena grid coordinates,
+  // block order, and topology across all snapshots. Primitive data remain fresh.
+  sample_spatial_reuse = p_input_reader->sample_spatial_reuse.value_or(false);
+  if (sample_spatial_reuse)
+  {
+    if (model_type != ModelType::simulation
+        or p_input_reader->simulation_format.value() != SimulationFormat::athena
+        or not p_input_reader->simulation_interp.value_or(false)
+        or p_input_reader->simulation_block_interp.value_or(false)
+        or not p_input_reader->slow_light_on.value_or(false)
+        or not p_input_reader->slow_interp.value_or(false))
+      throw BlacklightException("sample_spatial_reuse requires a fixed Athena grid, "
+          "simulation_interp=true, simulation_block_interp=false, "
+          "slow_light_on=true and slow_interp=true.");
+    if (p_input_reader->checkpoint_sample_load.value_or(false)
+        or p_input_reader->checkpoint_sample_save.value_or(false)
+        or p_input_reader->checkpoint_geodesic_load.value_or(false)
+        or p_input_reader->checkpoint_geodesic_save.value_or(false))
+      throw BlacklightException("sample_spatial_reuse is incompatible with checkpoints.");
+  }
+  geodesic_layout_reused = p_geodesic_integrator->layout_reused;
+
   // Copy checkpoint parameters
   if (model_type == ModelType::simulation)
   {
@@ -50,6 +72,8 @@ RadiationIntegrator::RadiationIntegrator(const InputReader *p_input_reader,
         and p_input_reader->checkpoint_sample_load.value())
       BlacklightWarning("Ignoring checkpoint_sample_load selection.");
   }
+
+  simulation_phi_periodic = p_input_reader->simulation_phi_periodic.value_or(false);
 
   // Copy simulation parameters
   if (model_type == ModelType::simulation)
@@ -235,6 +259,9 @@ RadiationIntegrator::RadiationIntegrator(const InputReader *p_input_reader,
     }
     else
       adaptive_frequency_num = 0;
+    adaptive_intensity_floor = p_input_reader->adaptive_intensity_floor.value_or(0.0);
+    adaptive_criteria_r_min = p_input_reader->adaptive_criteria_r_min.value_or(-1.0);
+    adaptive_criteria_r_max = p_input_reader->adaptive_criteria_r_max.value_or(-1.0);
     adaptive_val_frac = p_input_reader->adaptive_val_frac.value();
     if (adaptive_val_frac >= 0.0)
       adaptive_val_cut = p_input_reader->adaptive_val_cut.value();

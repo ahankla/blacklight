@@ -1,6 +1,7 @@
 // Blacklight radiation integrator - adaptive ray tracing
 
 // C++ headers
+#include <algorithm>  // max
 #include <cmath>  // abs, hypot, isfinite
 
 // Library headers
@@ -35,6 +36,22 @@ bool RadiationIntegrator::CheckAdaptiveRefinement()
   for (int n = 1; n <= adaptive_level; n++)
     linear_num_blocks *= 2;
 
+  // Conservative screen-footprint overlap; this limits criteria, never forced
+  // regions or image samples. Captures are immutable during the parallel loop.
+  const double margin = camera_width / linear_num_blocks * std::sqrt(0.5);
+  const auto outside_criteria = [this, linear_num_blocks, margin](int block)
+  {
+    if (adaptive_criteria_r_min < 0.0 and adaptive_criteria_r_max < 0.0)
+      return false;
+    double y = ((camera_loc[adaptive_level](block,0) + 0.5) / linear_num_blocks - 0.5)
+        * camera_width;
+    double x = ((camera_loc[adaptive_level](block,1) + 0.5) / linear_num_blocks - 0.5)
+        * camera_width;
+    double r = std::hypot(x, y);
+    return (adaptive_criteria_r_min >= 0.0 and r + margin < adaptive_criteria_r_min)
+        or (adaptive_criteria_r_max >= 0.0 and r - margin > adaptive_criteria_r_max);
+  };
+
   // Work in parallel
   int num_refined_blocks = 0;
   #pragma omp parallel
@@ -66,6 +83,12 @@ bool RadiationIntegrator::CheckAdaptiveRefinement()
             }
           if (refinement_flags[0](block))
             continue;
+        }
+
+        if (outside_criteria(block))
+        {
+          refinement_flags[adaptive_level](block) = false;
+          continue;
         }
 
         // Check remaining refinement conditions
@@ -110,6 +133,12 @@ bool RadiationIntegrator::CheckAdaptiveRefinement()
             }
           if (refinement_flags[adaptive_level](block))
             continue;
+        }
+
+        if (outside_criteria(block))
+        {
+          refinement_flags[adaptive_level](block) = false;
+          continue;
         }
 
         // Check remaining refinement conditions
@@ -165,6 +194,17 @@ bool RadiationIntegrator::EvaluateBlock(int thread)
   // Extract intensity
   Array<double> intensity = image_blocks[thread];
   intensity.Slice(3, 0, 0);
+
+  // Mesh selection only; forced regions bypass EvaluateBlock in the caller.
+  if (adaptive_intensity_floor > 0.0)
+  {
+    double max_intensity = 0.0;
+    for (int i = 0; i < adaptive_block_size; i++)
+      for (int j = 0; j < adaptive_block_size; j++)
+        max_intensity = std::max(max_intensity, std::abs(intensity(i,j)));
+    if (max_intensity < adaptive_intensity_floor)
+      return false;
+  }
 
   // Test value of intensity
   if (adaptive_val_frac >= 0.0)
